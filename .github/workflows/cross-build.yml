@@ -21,20 +21,28 @@ jobs:
           wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz
           mkdir -p official
           tar -xJf official.tar.xz -C official
-          ls official/opt/onlyoffice/documentbuilder/x2t
 
-      - name: Extract glibc for aarch64 via apt
+      - name: Download arm64 glibc debs directly
         run: |
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update -qq
-          cd /tmp
-          apt-get download libc6:arm64 libstdc++6:arm64 libgcc-s1:arm64
           mkdir -p glibc
-          for deb in *.deb; do
-            dpkg-deb -x "$deb" glibc/
+          cd glibc
+          BASE="http://ports.ubuntu.com/ubuntu-ports/pool/main"
+          for pkg in \
+            "g/glibc/libc6_2.39-0ubuntu8.3_arm64.deb" \
+            "g/gcc-13/libgcc-s1_13.3.0-6ubuntu2~24.04_arm64.deb" \
+            "g/gcc-13/libstdc++6_13.3.0-6ubuntu2~24.04_arm64.deb"; do
+            wget -q "$BASE/$pkg" || true
           done
-          find glibc -name "*.so*" -o -name "ld-linux*" | sort
-          ls -la glibc/lib/
+          ls -la
+
+      - name: Extract debs
+        run: |
+          mkdir -p glibc-extract
+          for deb in glibc/*.deb; do
+            dpkg-deb -x "$deb" glibc-extract/
+          done
+          find glibc-extract -name "*.so*" -o -name "ld-linux*" | sort
+          ls -la glibc-extract/lib/
 
       - name: Bundle binaries
         run: |
@@ -42,8 +50,8 @@ jobs:
           OUTDIR="dist/$BUILDER"
           mkdir -p "$OUTDIR/system"
           cp -r official/$BUILDER/* "$OUTDIR/"
-          cp -r /tmp/glibc/lib/aarch64-linux-gnu/*.so* "$OUTDIR/system/" 2>/dev/null || true
-          cp -r /tmp/glibc/lib/ld-linux-aarch64* "$OUTDIR/system/" 2>/dev/null || true
+          cp -r glibc-extract/lib/aarch64-linux-gnu/*.so* "$OUTDIR/system/" 2>/dev/null || true
+          cp -r glibc-extract/lib/ld-linux-aarch64* "$OUTDIR/system/" 2>/dev/null || true
 
       - name: Patch ELF interpreter
         run: |
@@ -69,6 +77,15 @@ jobs:
           exec "$DIR/opt/onlyoffice/documentbuilder/x2t" "$@"
           WRAP
           chmod +x dist/xlsx2pdf
+          cat > dist/install.sh << 'INST'
+          #!/bin/sh
+          DEST="${1:-/opt/onlyoffice/documentbuilder}"
+          cp -r opt/onlyoffice/documentbuilder "$DEST"
+          cp xlsx2pdf /usr/local/bin/
+          chmod +x /usr/local/bin/xlsx2pdf
+          echo "Done. Run: xlsx2pdf input.xlsx [output.pdf]"
+          INST
+          chmod +x dist/install.sh
           cd dist
           tar -czf ../${PRODUCT}-aarch64-musl.tar.gz .
           ls -lh ../${PRODUCT}-aarch64-musl.tar.gz
