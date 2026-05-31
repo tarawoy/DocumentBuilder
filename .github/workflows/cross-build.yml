@@ -36,7 +36,7 @@ jobs:
       - name: Build in aarch64 Alpine container
         run: |
           mkdir -p output
-          docker run --rm --privileged \
+          docker run --rm --privileged --platform linux/arm64 \
             -v $PWD:/workspace \
             -v $PWD/output:/output \
             arm64v8/alpine:3.21 /bin/sh -c "
