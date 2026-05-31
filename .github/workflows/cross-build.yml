@@ -1,16 +1,7 @@
-name: 🏗️ Cross-build for aarch64-musl
+name: 📦 Bundle aarch64-musl
 
 on:
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: Build method
-        required: true
-        default: qemu-alpine
-        type: choice
-        options:
-          - qemu-alpine
-          - release-portable
   push:
     branches: [master, main]
 
@@ -18,62 +9,108 @@ env:
   PRODUCT: onlyoffice-documentbuilder
 
 jobs:
-  qemu-alpine:
-    name: Build via QEMU aarch64 Alpine
+  bundle:
+    name: Bundle official + glibc for musl
     runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' && inputs.build_type == 'qemu-alpine' || github.event_name == 'push'
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 1
 
-      - uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - name: Build in aarch64 Alpine container
+      - name: Download official aarch64 release
         run: |
-          mkdir -p output
-          docker run --rm --privileged --platform linux/arm64 \
-            -v $PWD:/workspace \
-            -v $PWD/output:/output \
-            arm64v8/alpine:3.21 /bin/sh -c "
-            set -e
-            echo '=== Installing build deps ==='
-            apk add --no-cache build-base git curl cmake linux-headers \
-              icu-dev boost-dev openssl-dev zlib-dev freetype-dev \
-              libpng-dev libjpeg-turbo-dev expat-dev libxml2-dev patchelf
-            
-            cd /workspace
-            
-            echo '=== Building 3rd Party ==='
-            cd core/Common/3dParty
-            bash make.sh || true
-            cd /workspace
-            
-            echo '=== Building core ==='
-            cd core
-            make -j\$(nproc) all ext || true
-            cd /workspace
-            
-            echo '=== Building sdkjs ==='
-            cd sdkjs
-            make -j\$(nproc) || true
-            cd /workspace
-            
-            echo '=== Installing ==='
-            mkdir -p /output/opt/onlyoffice/documentbuilder
-            make install DEST_DIR=/output/opt/onlyoffice/documentbuilder || true
-            
-            echo '=== Done ==='
-            ls -la /output/
-            "
+          wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz
+          mkdir -p official
+          tar -xJf official.tar.xz -C official
 
-      - name: Package artifact
+      - name: Download Ubuntu aarch64 glibc
         run: |
-          cd output
+          mkdir -p glibc
+          cd glibc
+          wget -q "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04-base-arm64.tar.gz" -O rootfs.tar.gz
+          tar -xzf rootfs.tar.gz --wildcards \
+            'lib/aarch64-linux-gnu/libc.so*' \
+            'lib/aarch64-linux-gnu/ld-linux-aarch64*' \
+            'lib/aarch64-linux-gnu/libm.so*' \
+            'lib/aarch64-linux-gnu/libpthread.so*' \
+            'lib/aarch64-linux-gnu/libdl.so*' \
+            'lib/aarch64-linux-gnu/librt.so*' \
+            'lib/aarch64-linux-gnu/libstdc++.so*' \
+            'lib/aarch64-linux-gnu/libgcc_s.so*' \
+            'lib/aarch64-linux-gnu/libnss*' \
+            'lib/aarch64-linux-gnu/libresolv*' \
+            'lib/aarch64-linux-gnu/libutil.so*' \
+            2>/dev/null || true
+          find . -name "*.so*" -o -name "ld-*" | sort
+
+      - name: Bundle everything
+        run: |
+          BUILDER="opt/onlyoffice/documentbuilder"
+          OUTDIR="dist/$BUILDER"
+          mkdir -p "$OUTDIR/system"
+          
+          # Copy official binaries
+          cp -r official/$BUILDER/* "$OUTDIR/"
+          
+          # Copy glibc
+          cp -r glibc/lib/aarch64-linux-gnu/*.so* "$OUTDIR/system/" 2>/dev/null || true
+          
+          # Find ld-linux
+          LDLINUX=$(find glibc -name "ld-linux-aarch64*" -type f | head -1)
+          if [ -n "$LDLINUX" ]; then
+            cp -v "$LDLINUX" "$OUTDIR/system/"
+            cp -v "$LDLINUX" "$OUTDIR/"
+          fi
+
+      - name: Patch ELF interpreter
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+          BUILDER="dist/opt/onlyoffice/documentbuilder"
+          
+          # Find the bundled linker
+          LINKER=$(find "$BUILDER" -name "ld-linux-aarch64*" | head -1)
+          LINKER_NAME=$(basename "$LINKER")
+          echo "Linker: $LINKER_NAME"
+          
+          # Patch all ELF files
+          find "$BUILDER" -type f | while read f; do
+            if readelf -h "$f" 2>/dev/null | grep -q "ELF64.*aarch64"; then
+              echo "Patching: $(basename $f)"
+              patchelf --set-interpreter "./system/$LINKER_NAME" "$f" 2>/dev/null || true
+              patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$f" 2>/dev/null || true
+            fi
+          done
+          
+          # Check one binary
+          echo "---"
+          readelf -l "$BUILDER/x2t" | grep "interpreter\|INTERP" || true
+          readelf -d "$BUILDER/x2t" | grep "RPATH\|RUNPATH" || true
+
+      - name: Create wrapper scripts + package
+        run: |
+          # xlsx2pdf wrapper
+          cat > dist/xlsx2pdf.sh << 'EOF'
+          #!/bin/sh
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          export LD_LIBRARY_PATH="$DIR/opt/onlyoffice/documentbuilder:$DIR/opt/onlyoffice/documentbuilder/system"
+          exec "$DIR/opt/onlyoffice/documentbuilder/x2t" "$@"
+          EOF
+          chmod +x dist/xlsx2pdf.sh
+          
+          # install script
+          cat > dist/install.sh << 'EOF'
+          #!/bin/sh
+          DEST="${1:-/opt/onlyoffice/documentbuilder}"
+          echo "Installing to $DEST ..."
+          mkdir -p "$DEST"
+          cp -r opt/onlyoffice/documentbuilder/* "$DEST/"
+          cp xlsx2pdf.sh /usr/local/bin/xlsx2pdf
+          chmod +x /usr/local/bin/xlsx2pdf
+          echo "Done."
+          EOF
+          chmod +x dist/install.sh
+          
+          # Package
+          cd dist
           tar -czf ../${PRODUCT}-aarch64-musl.tar.gz .
           ls -lh ../${PRODUCT}-aarch64-musl.tar.gz
 
@@ -81,41 +118,3 @@ jobs:
         with:
           name: ${PRODUCT}-aarch64-musl
           path: ${PRODUCT}-aarch64-musl.tar.gz
-
-  release-portable:
-    name: Package official release for musl
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' && inputs.build_type == 'release-portable'
-
-    steps:
-      - name: Download official aarch64 release
-        run: |
-          wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz
-          mkdir -p official
-          tar -xJf official.tar.xz -C official
-
-      - name: Package with wrapper scripts
-        run: |
-          mkdir -p output/opt/onlyoffice/documentbuilder
-          cp -r official/opt/onlyoffice/documentbuilder/* output/opt/onlyoffice/documentbuilder/
-          
-          # Create wrapper script
-          cat > output/xlsx2pdf << 'WRAPPER'
-          #!/bin/sh
-          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-          BUILDER="${SCRIPT_DIR}/opt/onlyoffice/documentbuilder"
-          LD_LIBRARY_PATH="${BUILDER}:${LD_LIBRARY_PATH}"
-          export LD_LIBRARY_PATH
-          INPUT="$1"
-          OUTPUT="${2:-${INPUT%.xlsx}.pdf}"
-          "${BUILDER}/x2t" "${INPUT}" "${OUTPUT}"
-          WRAPPER
-          chmod +x output/xlsx2pdf
-          
-          tar -czf ${PRODUCT}-aarch64-musl-portable.tar.gz -C output .
-          ls -lh ${PRODUCT}-aarch64-musl-portable.tar.gz
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${PRODUCT}-aarch64-musl-portable
-          path: ${PRODUCT}-aarch64-musl-portable.tar.gz
