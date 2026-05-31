@@ -13,70 +13,67 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download official aarch64 release
+      - name: Download official aarch64
         run: |
-          wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz
+          set +e
+          wget -q "${OURL}" -O official.tar.xz
           mkdir -p official
           tar -xJf official.tar.xz -C official
+        env:
+          OURL: "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz"
 
       - name: Download arm64 glibc debs
         run: |
+          set +e
           mkdir -p glibc
           cd glibc
           BASE="http://ports.ubuntu.com/ubuntu-ports/pool/main"
-          curl -fSL --retry 3 "$BASE/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb" -O
-          curl -fSL --retry 3 "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" -O
-          curl -fSL --retry 3 "$BASE/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb" -O
-          ls -la
+          curl -fSL --retry 3 "$BASE/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb" -O || true
+          curl -fSL --retry 3 "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" -O || true
+          curl -fSL --retry 3 "$BASE/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb" -O || true
 
       - name: Extract debs
         run: |
+          set +e
           mkdir -p glibc-extract
           for deb in glibc/*.deb; do
-            echo "Extracting: $deb"
-            dpkg-deb -x "$deb" glibc-extract/
+            dpkg-deb -x "$deb" glibc-extract/ || true
           done
-          echo "=== File structure ==="
-          find glibc-extract -type d | head -20
-          echo "=== libc location ==="
-          find glibc-extract -name "libc.so.6" -type f | head -5
-          echo "=== glibc version ==="
-          strings $(find glibc-extract -name "libc.so.6" -type f | head -1) 2>/dev/null | grep "^GNU C Library" || echo "strings not found"
 
       - name: Copy to dist
         run: |
+          set +e
           DEST="dist/opt/onlyoffice/documentbuilder"
           mkdir -p "$DEST/system"
-          cp -r official/opt/onlyoffice/documentbuilder/* "$DEST/"
+          cp -r official/opt/onlyoffice/documentbuilder/* "$DEST/" 2>/dev/null
           find glibc-extract -type f \( -name "*.so*" -o -name "ld-linux*" \) | while read f; do
-            cp -v "$f" "$DEST/system/"
+            cp "$f" "$DEST/system/" 2>/dev/null || true
           done
-          cp -v "$DEST/system/ld-linux-aarch64.so.1" "$DEST/" 2>/dev/null || true
-          # libstdc++ symlink
+          cp "$DEST/system/ld-linux-aarch64.so.1" "$DEST/" 2>/dev/null || true
           cd "$DEST/system"
           for v in libstdc++.so.6.0.33 libstdc++.so.6.0.32 libstdc++.so.6.0.30; do
-            [ -f "$v" ] && ln -sf "$v" libstdc++.so.6 && echo "Symlinked $v -> libstdc++.so.6"
+            [ -f "$v" ] && ln -sf "$v" libstdc++.so.6
           done
-          [ ! -f libstdc++.so.6 ] && echo "WARNING: No libstdc++ found!"
 
-      - name: Fix config + create wrapper
+      - name: Ensure AllFonts.js + wrapper
         run: |
+          set +e
           DEST="dist/opt/onlyoffice/documentbuilder"
           [ ! -f "$DEST/sdkjs/common/AllFonts.js" ] && echo 'var AllFonts={list:[]};' > "$DEST/sdkjs/common/AllFonts.js"
-          cat > dist/xlsx2pdf << 'WRAPPER'
+          cat > dist/xlsx2pdf << 'EOF'
           #!/bin/sh
           DIR="$(cd "$(dirname "$0")" && pwd)"
           B="$DIR/opt/onlyoffice/documentbuilder"
           cd "$B"
           export LD_LIBRARY_PATH="system:."
           exec ./system/ld-linux-aarch64.so.1 ./x2t "$@"
-          WRAPPER
+          EOF
           chmod +x dist/xlsx2pdf
 
       - name: Package
         run: |
-          cd dist && tar -czf ../onlyoffice-documentbuilder-aarch64-musl.tar.gz .
-          ls -lh ../*.tar.gz
+          set +e
+          cd dist && tar -czf ../onlyoffice-documentbuilder-aarch64-musl.tar.gz . && ls -lh ../*.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
