@@ -15,65 +15,52 @@ jobs:
 
       - name: Download official aarch64
         run: |
-          set +e
           wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz
           mkdir -p official
           tar -xJf official.tar.xz -C official
 
-      - name: Download arm64 glibc debs (Ubuntu 22.04 Jammy = glibc 2.35)
+      - name: Download arm64 glibc (Ubuntu 22.04)
         run: |
-          set +e
           mkdir -p glibc
           cd glibc
-          JAMMY="http://ports.ubuntu.com/ubuntu-ports/pool/main"
+          BASE="http://ports.ubuntu.com/ubuntu-ports/pool/main"
           for url in \
-            "$JAMMY/g/glibc/libc6_2.35-0ubuntu3.13_arm64.deb" \
-            "$JAMMY/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_arm64.deb" \
-            "$JAMMY/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04.3_arm64.deb"; do
-            curl -fSL --retry 3 "$url" -O || echo "FAIL: $(basename $url)"
+            "$BASE/g/glibc/libc6_2.35-0ubuntu3.13_arm64.deb" \
+            "$BASE/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_arm64.deb" \
+            "$BASE/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04.3_arm64.deb"; do
+            curl -fSL --retry 3 "$url" -O
           done
 
       - name: Extract debs
         run: |
-          set +e
           mkdir -p glibc-extract
           for deb in glibc/*.deb; do dpkg-deb -x "$deb" glibc-extract/; done
-          echo "=== glibc version ==="
-          strings glibc-extract/lib/aarch64-linux-gnu/libc.so.6 2>/dev/null | grep "^GNU C Library"
 
       - name: Copy to dist
         run: |
-          set +e
-          B="dist/opt/onlyoffice/documentbuilder"
-          mkdir -p "$B/system"
-          cp -r official/opt/onlyoffice/documentbuilder/* "$B/"
-          for f in $(find glibc-extract -type f -name "*.so*" -o -type f -name "ld-linux*"); do
-            cp -v "$f" "$B/system/"
+          DEST="dist/opt/onlyoffice/documentbuilder"
+          mkdir -p "$DEST/system"
+          cp -r official/opt/onlyoffice/documentbuilder/* "$DEST/"
+          find glibc-extract -type f -name "*.so*" -exec cp {} "$DEST/system/" \;
+          find glibc-extract -type f -name "ld-linux*" | while read f; do
+            cp "$f" "$DEST/system/"
+            cp "$f" "$DEST/"
           done
-          cp -v "$B/system/ld-linux-aarch64.so.1" "$B/" 2>/dev/null || true
 
-      - name: Patch with patchelf
+      - name: Create wrapper script
         run: |
-          sudo apt-get install -y -qq patchelf
-          B="dist/opt/onlyoffice/documentbuilder"
-          LFILE=$(ls "$B"/ld-linux-aarch64* 2>/dev/null | head -1)
-          [ -z "$LFILE" ] && LFILE=$(ls "$B"/system/ld-linux-aarch64* 2>/dev/null | head -1) && cp "$LFILE" "$B/"
-          LNAME=$(basename "$LFILE")
-          echo "=== Patch x2t ==="
-          readelf -l "$B/x2t" | grep -i interp
-          patchelf --set-interpreter "./system/$LNAME" "$B/x2t"
-          echo "=== Verify ==="
-          readelf -l "$B/x2t" | grep -i interp
+          cat > dist/xlsx2pdf << 'WRAPPER'
+          #!/bin/sh
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          B="$DIR/opt/onlyoffice/documentbuilder"
+          cd "$B"
+          export LD_LIBRARY_PATH="system:."
+          exec ./system/ld-linux-aarch64.so.1 ./x2t "$@"
+          WRAPPER
+          chmod +x dist/xlsx2pdf
 
       - name: Package
         run: |
-          cat > dist/xlsx2pdf << 'WRAP'
-          #!/bin/sh
-          DIR="$(cd "$(dirname "$0")" && pwd)"
-          export LD_LIBRARY_PATH="$DIR/opt/onlyoffice/documentbuilder:$DIR/opt/onlyoffice/documentbuilder/system"
-          exec "$DIR/opt/onlyoffice/documentbuilder/x2t" "$@"
-          WRAP
-          chmod +x dist/xlsx2pdf
           cd dist && tar -czf ../onlyoffice-documentbuilder-aarch64-musl.tar.gz .
           ls -lh ../*.tar.gz
 
