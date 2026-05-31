@@ -20,16 +20,16 @@ jobs:
           mkdir -p official
           tar -xJf official.tar.xz -C official
 
-      - name: Download arm64 glibc debs
+      - name: Download arm64 glibc debs (Ubuntu 22.04 Jammy = glibc 2.35)
         run: |
           set +e
           mkdir -p glibc
           cd glibc
-          BASE="http://ports.ubuntu.com/ubuntu-ports/pool/main"
+          JAMMY="http://ports.ubuntu.com/ubuntu-ports/pool/main"
           for url in \
-            "$BASE/g/glibc/libc6_2.43-2ubuntu2_arm64.deb" \
-            "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" \
-            "$BASE/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb"; do
+            "$JAMMY/g/glibc/libc6_2.35-0ubuntu3.13_arm64.deb" \
+            "$JAMMY/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_arm64.deb" \
+            "$JAMMY/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04.3_arm64.deb"; do
             curl -fSL --retry 3 "$url" -O || echo "FAIL: $(basename $url)"
           done
 
@@ -38,6 +38,8 @@ jobs:
           set +e
           mkdir -p glibc-extract
           for deb in glibc/*.deb; do dpkg-deb -x "$deb" glibc-extract/; done
+          echo "=== glibc version ==="
+          strings glibc-extract/lib/aarch64-linux-gnu/libc.so.6 2>/dev/null | grep "^GNU C Library"
 
       - name: Copy to dist
         run: |
@@ -45,14 +47,10 @@ jobs:
           B="dist/opt/onlyoffice/documentbuilder"
           mkdir -p "$B/system"
           cp -r official/opt/onlyoffice/documentbuilder/* "$B/"
-          # Use -type f to avoid matching directories like ld.so.conf.d
-          for f in $(find glibc-extract -type f -name "*.so" -o -type f -name "*.so.*"); do
+          for f in $(find glibc-extract -type f -name "*.so*" -o -type f -name "ld-linux*"); do
             cp -v "$f" "$B/system/"
           done
-          for f in $(find glibc-extract -type f -name "*ld-linux*" -o -type f -name "*ld.so*"); do
-            cp -v "$f" "$B/system/"
-            cp -v "$f" "$B/"
-          done
+          cp -v "$B/system/ld-linux-aarch64.so.1" "$B/" 2>/dev/null || true
 
       - name: Patch with patchelf
         run: |
