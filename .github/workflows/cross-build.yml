@@ -19,49 +19,50 @@ jobs:
           mkdir -p official
           tar -xJf official.tar.xz -C official
 
-      - name: Download arm64 glibc (Ubuntu 24.04 Noble = glibc 2.39)
+      - name: Download arm64 glibc debs
         run: |
           mkdir -p glibc
           cd glibc
           BASE="http://ports.ubuntu.com/ubuntu-ports/pool/main"
-          # glibc 2.39 from Ubuntu 24.04 - has _dl_find_object (added in 2.36)
-          for url in \
-            "$BASE/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb" \
-            "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" \
-            "$BASE/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb"; do
-            curl -fSL --retry 3 "$url" -O
-          done
+          curl -fSL --retry 3 "$BASE/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb" -O
+          curl -fSL --retry 3 "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" -O
+          curl -fSL --retry 3 "$BASE/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb" -O
+          ls -la
 
       - name: Extract debs
         run: |
           mkdir -p glibc-extract
-          for deb in glibc/*.deb; do dpkg-deb -x "$deb" glibc-extract/; done
-          strings glibc-extract/lib/aarch64-linux-gnu/libc.so.6 2>/dev/null | grep "^GNU C Library"
-          # Verify _dl_find_object exists
-          strings glibc-extract/lib/aarch64-linux-gnu/libc.so.6 2>/dev/null | grep "_dl_find_object" || echo "WARNING: _dl_find_object NOT FOUND"
+          for deb in glibc/*.deb; do
+            echo "Extracting: $deb"
+            dpkg-deb -x "$deb" glibc-extract/
+          done
+          echo "=== File structure ==="
+          find glibc-extract -type d | head -20
+          echo "=== libc location ==="
+          find glibc-extract -name "libc.so.6" -type f | head -5
+          echo "=== glibc version ==="
+          strings $(find glibc-extract -name "libc.so.6" -type f | head -1) 2>/dev/null | grep "^GNU C Library" || echo "strings not found"
 
       - name: Copy to dist
         run: |
           DEST="dist/opt/onlyoffice/documentbuilder"
           mkdir -p "$DEST/system"
           cp -r official/opt/onlyoffice/documentbuilder/* "$DEST/"
-          find glibc-extract -type f -name "*.so*" -exec cp {} "$DEST/system/" \;
-          find glibc-extract -type f -name "ld-linux*" | while read f; do
-            cp "$f" "$DEST/system/"
-            cp "$f" "$DEST/"
+          find glibc-extract -type f \( -name "*.so*" -o -name "ld-linux*" \) | while read f; do
+            cp -v "$f" "$DEST/system/"
           done
+          cp -v "$DEST/system/ld-linux-aarch64.so.1" "$DEST/" 2>/dev/null || true
+          # libstdc++ symlink
+          cd "$DEST/system"
+          for v in libstdc++.so.6.0.33 libstdc++.so.6.0.32 libstdc++.so.6.0.30; do
+            [ -f "$v" ] && ln -sf "$v" libstdc++.so.6 && echo "Symlinked $v -> libstdc++.so.6"
+          done
+          [ ! -f libstdc++.so.6 ] && echo "WARNING: No libstdc++ found!"
 
-      - name: Ensure AllFonts.js + libstdc++ symlink
+      - name: Fix config + create wrapper
         run: |
           DEST="dist/opt/onlyoffice/documentbuilder"
           [ ! -f "$DEST/sdkjs/common/AllFonts.js" ] && echo 'var AllFonts={list:[]};' > "$DEST/sdkjs/common/AllFonts.js"
-          cd "$DEST/system"
-          [ -f libstdc++.so.6.0.33 ] && ln -sf libstdc++.so.6.0.33 libstdc++.so.6
-          [ -f libstdc++.so.6.0.32 ] && ln -sf libstdc++.so.6.0.32 libstdc++.so.6
-          [ -f libstdc++.so.6.0.30 ] && ln -sf libstdc++.so.6.0.30 libstdc++.so.6
-
-      - name: Create wrapper script
-        run: |
           cat > dist/xlsx2pdf << 'WRAPPER'
           #!/bin/sh
           DIR="$(cd "$(dirname "$0")" && pwd)"
