@@ -5,9 +5,6 @@ on:
   push:
     branches: [master, main]
 
-env:
-  PRODUCT: onlyoffice-documentbuilder
-
 jobs:
   bundle:
     name: Build for aarch64-musl
@@ -18,12 +15,14 @@ jobs:
 
       - name: Download official aarch64
         run: |
+          set +e
           wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz
           mkdir -p official
           tar -xJf official.tar.xz -C official
 
       - name: Download arm64 glibc debs
         run: |
+          set +e
           mkdir -p glibc
           cd glibc
           BASE="http://ports.ubuntu.com/ubuntu-ports/pool/main"
@@ -31,60 +30,82 @@ jobs:
             "$BASE/g/glibc/libc6_2.43-2ubuntu2_arm64.deb" \
             "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" \
             "$BASE/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb"; do
-            curl -fSL --retry 3 "$url" -O
+            curl -fSL --retry 3 "$url" -O && echo "OK: $(basename $url)" || echo "FAIL: $(basename $url)"
           done
+          echo "=== Downloaded files ==="
+          ls -la
 
       - name: Extract debs
         run: |
+          set +e
           mkdir -p glibc-extract
           for deb in glibc/*.deb; do
+            echo "Extracting: $deb"
             dpkg-deb -x "$deb" glibc-extract/
           done
-          echo "=== ld-linux ==="
-          find glibc-extract -name "ld-linux*" -type f
-          echo "=== .so files ==="
-          find glibc-extract -name "*.so*" -type f | sort
+          echo "=== glibc-extract structure ==="
+          find glibc-extract -type d | head -20
+          echo "=== ld-linux search ==="
+          find glibc-extract -name "*ld-linux*" -o -name "*ld.so*" | head -10
+          echo "=== .so files search ==="
+          find glibc-extract -name "*.so" -o -name "*.so.*" | head -20
 
-      - name: Bundle
+      - name: Copy to dist
         run: |
+          set +e
           B="dist/opt/onlyoffice/documentbuilder"
           mkdir -p "$B/system"
           cp -r official/opt/onlyoffice/documentbuilder/* "$B/"
-          # Copy ALL glibc .so files
-          find glibc-extract -type f \( -name "*.so*" -o -name "ld-linux*" \) -exec cp -v {} "$B/system/" \;
-          echo "=== system dir ==="
+          
+          # Copy files using simple for loops
+          echo "=== Copying .so files ==="
+          for f in $(find glibc-extract -name "*.so" -o -name "*.so.*"); do
+            cp -v "$f" "$B/system/"
+          done
+          
+          echo "=== Copying linker ==="
+          for f in $(find glibc-extract -name "*ld-linux*" -o -name "*ld.so*"); do
+            cp -v "$f" "$B/system/"
+            cp -v "$f" "$B/"
+          done
+          
+          echo "=== Files in system/ ==="
           ls -la "$B/system/"
-          echo "=== ld-linux ==="
-          ls -la "$B/system/ld-linux-aarch64"* 2>/dev/null || echo "NO LINKER FOUND"
 
-      - name: Patch ELF
+      - name: Patch with patchelf
         run: |
           sudo apt-get install -y -qq patchelf
           B="dist/opt/onlyoffice/documentbuilder"
-          L=$(ls "$B/system/ld-linux-aarch64"* 2>/dev/null | head -1)
-          if [ -z "$L" ]; then
-            echo "ERROR: no linker in system/"
-            exit 1
+          
+          # Find linker
+          LFILE=$(ls "$B"/ld-linux-aarch64* 2>/dev/null | head -1)
+          echo "Linker file: $LFILE"
+          
+          if [ -z "$LFILE" ]; then
+            # Try in system/
+            LFILE=$(ls "$B"/system/ld-linux-aarch64* 2>/dev/null | head -1)
+            echo "Linker in system/: $LFILE"
+            cp "$LFILE" "$B/"
+            LFILE="$B/$(basename $LFILE)"
           fi
-          LN=$(basename "$L")
-          echo "Linker: $LN"
-          echo "=== Before patching ==="
-          readelf -l "$B/x2t" | grep INTERP
-          for f in $(find "$B" -maxdepth 1 -type f); do
-            if readelf -h "$f" 2>/dev/null | grep -q "ELF64.*aarch64"; then
-              echo "Patching: $(basename $f)"
-              patchelf --set-interpreter "./system/$LN" "$f"
+          
+          LNAME=$(basename "$LFILE")
+          echo "=== Patching x2t ==="
+          readelf -l "$B/x2t" | grep -i interp
+          patchelf --set-interpreter "./system/$LNAME" "$B/x2t"
+          patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$B/x2t"
+          readelf -l "$B/x2t" | grep -i interp
+          readelf -d "$B/x2t" | grep -i rpath
+          
+          echo "=== Patching .so files ==="
+          for f in "$B"/*.so; do
+            [ -f "$f" ] || continue
+            if readelf -h "$f" 2>/dev/null | grep -q "ELF64"; then
+              patchelf --set-interpreter "./system/$LNAME" "$f"
               patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$f"
+              echo "Patched: $(basename $f)"
             fi
           done
-          # Also patch .so files
-          for f in $(find "$B/system" -type f); do
-            if readelf -h "$f" 2>/dev/null | grep -q "ELF64.*aarch64"; then
-              patchelf --set-rpath "\$ORIGIN:\$ORIGIN/..:\$ORIGIN" "$f" 2>/dev/null || true
-            fi
-          done
-          echo "=== After patching ==="
-          readelf -l "$B/x2t" | grep INTERP
 
       - name: Package
         run: |
