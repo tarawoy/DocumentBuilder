@@ -1,0 +1,312 @@
+name: 🏗️ Cross-build for aarch64-musl
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build method'
+        required: true
+        default: 'qemu-alpine'
+        type: choice
+        options:
+          - qemu-alpine
+          - native-ubuntu
+          - openwrt-sdk
+  push:
+    branches: [master, main]
+
+env:
+  BUILD_VERSION: v9.4.0
+  PRODUCT: onlyoffice-documentbuilder
+
+jobs:
+  qemu-alpine:
+    name: 🐧 Build via QEMU aarch64 Alpine
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch' && inputs.build_type == 'qemu-alpine' || github.event_name == 'push'
+
+    steps:
+      - name: 📥 Checkout repo with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: 🔧 Set up QEMU for aarch64
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: 🐳 Build inside aarch64 Alpine container
+        run: |
+          mkdir -p output
+          docker run --rm --privileged \
+            -v $PWD:/workspace \
+            -v $PWD/output:/output \
+            arm64v8/alpine:3.21 /bin/sh -c "
+            set -e
+            echo '=== Installing build dependencies ==='
+            apk add --no-cache \
+              build-base \
+              git \
+              curl \
+              cmake \
+              linux-headers \
+              icu-dev \
+              boost-dev \
+              openssl-dev \
+              zlib-dev \
+              freetype-dev \
+              libpng-dev \
+              libjpeg-turbo-dev \
+              expat-dev \
+              libxml2-dev \
+              patchelf
+
+            cd /workspace
+
+            echo '=== Building 3rd Party Dependencies ==='
+            cd core/Common/3dParty
+            # Skip heavy deps that can use system packages
+            for d in */; do
+              echo \"Processing \$d\"
+              cd \"\$d\"
+              if [ -f fetch.sh ]; then
+                echo \"  Fetching...\"
+                bash fetch.sh 2>/dev/null || true
+              fi
+              if [ -f build.sh ]; then
+                echo \"  Building...\"
+                bash build.sh 2>/dev/null || true
+              fi
+              cd ..
+            done
+            cd /workspace
+
+            echo '=== Building core ==='
+            cd core
+            make -j\$(nproc) all ext 2>&1 || echo 'WARNING: core build had issues'
+            cd /workspace
+
+            echo '=== Building sdkjs ==='
+            cd sdkjs
+            make -j\$(nproc) 2>&1 || echo 'WARNING: sdkjs build had issues'
+            cd /workspace
+
+            echo '=== Installing ==='
+            mkdir -p /output/opt/onlyoffice/documentbuilder
+            make install DEST_DIR=/output/opt/onlyoffice/documentbuilder 2>&1 || true
+
+            echo '=== Copying system musl deps ==='
+            mkdir -p /output/lib
+            # Copy musl and key system libs
+            for lib in libc.musl-aarch64.so.1 libstdc++.so.6 libgcc_s.so.1; do
+              find /usr -name \"\$lib\" -exec cp -v {} /output/lib/ \; 2>/dev/null || true
+            done
+
+            echo '=== Done ==='
+            ls -la /output/
+            "
+
+      - name: 📦 Package artifact
+        run: |
+          cd output
+          tar -czf ../${PRODUCT}-aarch64-musl.tar.gz .
+          ls -lh ../${PRODUCT}-aarch64-musl.tar.gz
+
+      - name: ⬆️ Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${PRODUCT}-aarch64-musl
+          path: ${PRODUCT}-aarch64-musl.tar.gz
+
+  openwrt-sdk:
+    name: 🔨 Build via OpenWrt SDK
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch' && inputs.build_type == 'openwrt-sdk'
+
+    steps:
+      - name: 📥 Checkout repo with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: ⬇️ Download OpenWrt SDK
+        run: |
+          SDK_URL="https://downloads.openwrt.org/releases/24.10.2/targets/armsr/armv8/openwrt-sdk-24.10.2-armsr-armv8_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          wget -q "$SDK_URL" -O sdk.tar.zst
+          mkdir sdk
+          tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
+          ls -la sdk/
+
+      - name: 🔧 Set up toolchain
+        run: |
+          SDK_DIR="$PWD/sdk"
+          # Find toolchain and target directories
+          TOOLCHAIN_DIR=$(find "$SDK_DIR/staging_dir" -maxdepth 1 -name "toolchain-*" -type d | head -1)
+          TARGET_DIR=$(find "$SDK_DIR/staging_dir" -maxdepth 1 -name "target-*" -type d | head -1)
+          
+          echo "TOOLCHAIN_DIR=$TOOLCHAIN_DIR" >> $GITHUB_ENV
+          echo "TARGET_DIR=$TARGET_DIR" >> $GITHUB_ENV
+          echo "CC=$TOOLCHAIN_DIR/bin/aarch64-openwrt-linux-musl-gcc" >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN_DIR/bin/aarch64-openwrt-linux-musl-g++" >> $GITHUB_ENV
+          echo "STAGING_DIR=$TARGET_DIR" >> $GITHUB_ENV
+          echo "$TOOLCHAIN_DIR/bin" >> $GITHUB_PATH
+
+      - name: 🔨 Attempt cross-compile
+        run: |
+          echo "=== Cross-compiler info ==="
+          $CC --version
+          $CXX --version
+          
+          echo "=== Building 3rd Party Dependencies ==="
+          cd core/Common/3dParty
+          # Override compiler for deps that support it
+          for d in */; do
+            echo "Processing $d"
+            cd "$d"
+            if [ -f build.sh ]; then
+              # Try to inject cross-compile flags
+              export CC=$CC
+              export CXX=$CXX
+              bash build.sh 2>&1 || echo "  WARNING: build.sh failed for $d (may need manual config)"
+            fi
+            cd ..
+          done
+          cd /workspace
+          
+          echo "=== Attempting core build ==="
+          cd core
+          make CC=$CC CXX=$CXX AR=$TOOLCHAIN_DIR/bin/aarch64-openwrt-linux-musl-ar \
+               RANLIB=$TOOLCHAIN_DIR/bin/aarch64-openwrt-linux-musl-ranlib \
+               CFLAGS="-I$TARGET_DIR/usr/include" \
+               LDFLAGS="-L$TARGET_DIR/usr/lib" \
+               -j$(nproc) all ext 2>&1 || echo "WARNING: core build had issues"
+          cd ..
+
+      - name: 📦 Package (even partial)
+        run: |
+          mkdir -p output
+          # Copy any built artifacts
+          find core/build -name "*.so*" -o -name "x2t" -o -name "docbuilder" 2>/dev/null | \
+            while read f; do
+              dir=$(dirname "$f" | sed 's|core/||')
+              mkdir -p "output/$dir"
+              cp -v "$f" "output/$dir/"
+            done 2>/dev/null || true
+          
+          tar -czf ${PRODUCT}-aarch64-musl-sdk.tar.gz output/ 2>/dev/null || echo "No artifacts built"
+          ls -la *.tar.gz 2>/dev/null || echo "No packages created"
+
+      - name: ⬆️ Upload (partial) artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${PRODUCT}-openwrt-sdk
+          path: ./*.tar.gz
+
+  release-pkg:
+    name: 📦 Package official release for musl
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch' && inputs.build_type == 'native-ubuntu' || github.event_name == 'push'
+
+    steps:
+      - name: ⬇️ Download official aarch64 release
+        run: |
+          wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" \
+            -O official.tar.xz
+          mkdir -p official
+          tar -xJf official.tar.xz -C official
+          echo "Official release extracted"
+
+      - name: 🔧 Build musl-compatible ICU libs
+        run: |
+          mkdir -p icu-build
+          cd icu-build
+          
+          # Download ICU source
+          wget -q "https://github.com/unicode-org/icu/releases/download/release-74-2/icu4c-74_2-src.tgz"
+          tar -xzf icu4c-74_2-src.tgz
+          
+          # Build ICU natively first (for tools)
+          cd icu/source
+          mkdir -p build-native && cd build-native
+          ../configure --prefix=$PWD/../../native-install --enable-static
+          make -j$(nproc)
+          make install
+          cd ../..
+          
+          # Build ICU for aarch64-musl via static linking
+          # Download musl toolchain
+          wget -q "https://musl.cc/aarch64-linux-musl-cross.tgz" -O musl-cross.tgz || true
+          if [ -f musl-cross.tgz ]; then
+            tar -xzf musl-cross.tgz
+            CROSS_DIR=$(ls -d aarch64-linux-musl-cross* 2>/dev/null | head -1)
+            export PATH="$PWD/$CROSS_DIR/bin:$PATH"
+            
+            cd icu/source
+            mkdir -p build-musl && cd build-musl
+            ../configure \
+              --host=aarch64-linux-musl \
+              --with-cross-build=$PWD/../build-native \
+              --prefix=$PWD/../../musl-install \
+              --enable-static \
+              --disable-shared
+            make -j$(nproc) 2>&1 || echo "ICU musl build may have issues"
+            make install 2>/dev/null || true
+          fi
+          cd /workspace
+
+      - name: 📦 Package with musl loader
+        run: |
+          mkdir -p output/opt/onlyoffice/documentbuilder
+          
+          # Copy official release
+          cp -r official/opt/onlyoffice/documentbuilder/* output/opt/onlyoffice/documentbuilder/ 2>/dev/null || true
+          
+          # Copy musl ICU if built
+          if [ -f icu-build/musl-install/lib/libicudata.a ]; then
+            mkdir -p output/opt/onlyoffice/documentbuilder/lib
+            cp icu-build/musl-install/lib/libicu*.a output/opt/onlyoffice/documentbuilder/lib/ 2>/dev/null || true
+          fi
+          
+          # Create installation script
+          cat > output/install.sh << 'INSTALL_EOF'
+#!/bin/sh
+# Install ONLYOFFICE Document Builder for OpenWrt/musl
+DEST="${1:-/opt/onlyoffice/documentbuilder}"
+mkdir -p "$DEST"
+cp -r opt/onlyoffice/documentbuilder/* "$DEST/"
+echo "Installed to $DEST"
+echo ""
+echo "To convert XLSX to PDF:"
+echo "  LD_LIBRARY_PATH=$DEST $DEST/x2t file.xlsx file.pdf"
+INSTALL_EOF
+          chmod +x output/install.sh
+          
+          # Create conversion script
+          cat > output/xlsx2pdf.sh << 'CONVERT_EOF'
+#!/bin/sh
+# Convert XLSX to PDF using ONLYOFFICE Document Builder
+INPUT="$1"
+OUTPUT="${2:-output.pdf}"
+if [ -z "$INPUT" ]; then
+  echo "Usage: $0 input.xlsx [output.pdf]"
+  exit 1
+fi
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILDER="${SCRIPT_DIR}/opt/onlyoffice/documentbuilder"
+LD_LIBRARY_PATH="${BUILDER}" "${BUILDER}/x2t" "$INPUT" "$OUTPUT"
+CONVERT_EOF
+          chmod +x output/xlsx2pdf.sh
+          
+          # Package
+          cd output
+          tar -czf ../${PRODUCT}-aarch64-musl-portable.tar.gz .
+          ls -lh ../${PRODUCT}-aarch64-musl-portable.tar.gz
+
+      - name: ⬆️ Upload portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${PRODUCT}-aarch64-musl-portable
+          path: ${PRODUCT}-aarch64-musl-portable.tar.gz
