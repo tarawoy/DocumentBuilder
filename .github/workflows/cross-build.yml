@@ -39,9 +39,11 @@ jobs:
           cp -r official/opt/onlyoffice/documentbuilder/* dist/opt/onlyoffice/documentbuilder/
           for f in $(find glibc-extract -type f -name "*.so*"); do cp "$f" dist/opt/onlyoffice/documentbuilder/system/; done
           for f in $(find glibc-extract -type f -name "ld-linux*"); do cp "$f" dist/opt/onlyoffice/documentbuilder/system/; cp "$f" dist/opt/onlyoffice/documentbuilder/; done
+          # Symlink libstdc++ - only match numeric .so files, NOT gdb.py
           cd dist/opt/onlyoffice/documentbuilder/system
-          ls libstdc++.so.6* 2>/dev/null | while read f; do ln -sf "$f" libstdc++.so.6 2>/dev/null; done
-          cd /home/runner
+          for v in libstdc++.so.6.0.33 libstdc++.so.6.0.32 libstdc++.so.6.0.31 libstdc++.so.6.0.30; do
+            [ -f "$v" ] && ln -sf "$v" libstdc++.so.6 && break
+          done
 
       - name: AllFonts
         run: |
