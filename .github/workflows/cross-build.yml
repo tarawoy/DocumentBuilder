@@ -13,21 +13,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download official aarch64
+      - name: Download official aarch64 release
         run: |
           wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz
           mkdir -p official
           tar -xJf official.tar.xz -C official
 
-      - name: Download arm64 glibc (Ubuntu 22.04)
+      - name: Download arm64 glibc (Ubuntu 24.04 Noble = glibc 2.39)
         run: |
           mkdir -p glibc
           cd glibc
           BASE="http://ports.ubuntu.com/ubuntu-ports/pool/main"
+          # glibc 2.39 from Ubuntu 24.04 - has _dl_find_object (added in 2.36)
           for url in \
-            "$BASE/g/glibc/libc6_2.35-0ubuntu3.13_arm64.deb" \
-            "$BASE/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04.3_arm64.deb" \
-            "$BASE/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04.3_arm64.deb"; do
+            "$BASE/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb" \
+            "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" \
+            "$BASE/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb"; do
             curl -fSL --retry 3 "$url" -O
           done
 
@@ -35,10 +36,11 @@ jobs:
         run: |
           mkdir -p glibc-extract
           for deb in glibc/*.deb; do dpkg-deb -x "$deb" glibc-extract/; done
-          # Verify libstdc++ symlink
-          ls -la glibc-extract/usr/lib/aarch64-linux-gnu/libstdc++*
+          strings glibc-extract/lib/aarch64-linux-gnu/libc.so.6 2>/dev/null | grep "^GNU C Library"
+          # Verify _dl_find_object exists
+          strings glibc-extract/lib/aarch64-linux-gnu/libc.so.6 2>/dev/null | grep "_dl_find_object" || echo "WARNING: _dl_find_object NOT FOUND"
 
-      - name: Copy to dist with symlinks
+      - name: Copy to dist
         run: |
           DEST="dist/opt/onlyoffice/documentbuilder"
           mkdir -p "$DEST/system"
@@ -48,20 +50,15 @@ jobs:
             cp "$f" "$DEST/system/"
             cp "$f" "$DEST/"
           done
-          # Create missing libstdc++ symlink
-          cd "$DEST/system"
-          ls libstdc++.so.6* 2>/dev/null || { L=$(ls libstdc++.so.6.0* 2>/dev/null | head -1); [ -n "$L" ] && ln -sf "$L" libstdc++.so.6; }
-          cd /home/runner
 
-      - name: Ensure AllFonts.js exists
+      - name: Ensure AllFonts.js + libstdc++ symlink
         run: |
           DEST="dist/opt/onlyoffice/documentbuilder"
-          if [ ! -f "$DEST/sdkjs/common/AllFonts.js" ]; then
-            echo "Creating placeholder AllFonts.js"
-            echo 'var AllFonts = {list: []};' > "$DEST/sdkjs/common/AllFonts.js"
-          fi
-          # Check sdk-all.bin files exist
-          ls -la "$DEST/sdkjs/cell/sdk-all.bin" "$DEST/sdkjs/word/sdk-all.bin" "$DEST/sdkjs/slide/sdk-all.bin" "$DEST/sdkjs/pdf/sdk-all.bin"
+          [ ! -f "$DEST/sdkjs/common/AllFonts.js" ] && echo 'var AllFonts={list:[]};' > "$DEST/sdkjs/common/AllFonts.js"
+          cd "$DEST/system"
+          [ -f libstdc++.so.6.0.33 ] && ln -sf libstdc++.so.6.0.33 libstdc++.so.6
+          [ -f libstdc++.so.6.0.32 ] && ln -sf libstdc++.so.6.0.32 libstdc++.so.6
+          [ -f libstdc++.so.6.0.30 ] && ln -sf libstdc++.so.6.0.30 libstdc++.so.6
 
       - name: Create wrapper script
         run: |
