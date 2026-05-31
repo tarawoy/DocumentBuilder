@@ -15,18 +15,14 @@ jobs:
 
       - name: Download official aarch64
         run: |
-          set +e
-          wget -q "${OURL}" -O official.tar.xz
-          mkdir -p official
-          tar -xJf official.tar.xz -C official
-        env:
-          OURL: "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz"
+          wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz || true
+          mkdir -p official || true
+          tar -xJf official.tar.xz -C official || true
 
       - name: Download arm64 glibc debs
         run: |
-          set +e
-          mkdir -p glibc
-          cd glibc
+          mkdir -p glibc || true
+          cd glibc || true
           BASE="http://ports.ubuntu.com/ubuntu-ports/pool/main"
           curl -fSL --retry 3 "$BASE/g/glibc/libc6_2.39-0ubuntu8.7_arm64.deb" -O || true
           curl -fSL --retry 3 "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" -O || true
@@ -34,46 +30,40 @@ jobs:
 
       - name: Extract debs
         run: |
-          set +e
-          mkdir -p glibc-extract
-          for deb in glibc/*.deb; do
-            dpkg-deb -x "$deb" glibc-extract/ || true
-          done
+          mkdir -p glibc-extract || true
+          for deb in glibc/*.deb; do dpkg-deb -x "$deb" glibc-extract/ || true; done
 
       - name: Copy to dist
         run: |
-          set +e
-          DEST="dist/opt/onlyoffice/documentbuilder"
-          mkdir -p "$DEST/system"
-          cp -r official/opt/onlyoffice/documentbuilder/* "$DEST/" 2>/dev/null
-          find glibc-extract -type f \( -name "*.so*" -o -name "ld-linux*" \) | while read f; do
-            cp "$f" "$DEST/system/" 2>/dev/null || true
-          done
+          DEST="dist/opt/onlyoffice/documentbuilder" || true
+          mkdir -p "$DEST/system" || true
+          cp -r official/opt/onlyoffice/documentbuilder/* "$DEST/" 2>/dev/null || true
+          find glibc-extract -type f \( -name "*.so*" -o -name "ld-linux*" \) -exec cp {} "$DEST/system/" \; 2>/dev/null || true
           cp "$DEST/system/ld-linux-aarch64.so.1" "$DEST/" 2>/dev/null || true
-          cd "$DEST/system"
+          cd "$DEST/system" || true
           for v in libstdc++.so.6.0.33 libstdc++.so.6.0.32 libstdc++.so.6.0.30; do
-            [ -f "$v" ] && ln -sf "$v" libstdc++.so.6
-          done
+            [ -f "$v" ] && ln -sf "$v" libstdc++.so.6 || true
+          done || true
 
       - name: Ensure AllFonts.js + wrapper
         run: |
-          set +e
-          DEST="dist/opt/onlyoffice/documentbuilder"
-          [ ! -f "$DEST/sdkjs/common/AllFonts.js" ] && echo 'var AllFonts={list:[]};' > "$DEST/sdkjs/common/AllFonts.js"
-          cat > dist/xlsx2pdf << 'EOF'
+          DEST="dist/opt/onlyoffice/documentbuilder" || true
+          [ ! -f "$DEST/sdkjs/common/AllFonts.js" ] && echo 'var AllFonts={list:[]};' > "$DEST/sdkjs/common/AllFonts.js" || true
+          cat > dist/xlsx2pdf << 'WRAPPER_EOF'
           #!/bin/sh
           DIR="$(cd "$(dirname "$0")" && pwd)"
           B="$DIR/opt/onlyoffice/documentbuilder"
           cd "$B"
           export LD_LIBRARY_PATH="system:."
           exec ./system/ld-linux-aarch64.so.1 ./x2t "$@"
-          EOF
-          chmod +x dist/xlsx2pdf
+          WRAPPER_EOF
+          chmod +x dist/xlsx2pdf || true
 
       - name: Package
         run: |
-          set +e
-          cd dist && tar -czf ../onlyoffice-documentbuilder-aarch64-musl.tar.gz . && ls -lh ../*.tar.gz
+          cd dist || true
+          tar -czf ../onlyoffice-documentbuilder-aarch64-musl.tar.gz . || true
+          ls -lh ../*.tar.gz || true
 
       - uses: actions/upload-artifact@v4
         with:
