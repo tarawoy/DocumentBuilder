@@ -35,8 +35,10 @@ jobs:
         run: |
           mkdir -p glibc-extract
           for deb in glibc/*.deb; do dpkg-deb -x "$deb" glibc-extract/; done
+          # Verify libstdc++ symlink
+          ls -la glibc-extract/usr/lib/aarch64-linux-gnu/libstdc++*
 
-      - name: Copy to dist
+      - name: Copy to dist with symlinks
         run: |
           DEST="dist/opt/onlyoffice/documentbuilder"
           mkdir -p "$DEST/system"
@@ -46,6 +48,20 @@ jobs:
             cp "$f" "$DEST/system/"
             cp "$f" "$DEST/"
           done
+          # Create missing libstdc++ symlink
+          cd "$DEST/system"
+          ls libstdc++.so.6* 2>/dev/null || { L=$(ls libstdc++.so.6.0* 2>/dev/null | head -1); [ -n "$L" ] && ln -sf "$L" libstdc++.so.6; }
+          cd /workspace
+
+      - name: Ensure AllFonts.js exists
+        run: |
+          DEST="dist/opt/onlyoffice/documentbuilder"
+          if [ ! -f "$DEST/sdkjs/common/AllFonts.js" ]; then
+            echo "Creating placeholder AllFonts.js"
+            echo 'var AllFonts = {list: []};' > "$DEST/sdkjs/common/AllFonts.js"
+          fi
+          # Check sdk-all.bin files exist
+          ls -la "$DEST/sdkjs/cell/sdk-all.bin" "$DEST/sdkjs/word/sdk-all.bin" "$DEST/sdkjs/slide/sdk-all.bin" "$DEST/sdkjs/pdf/sdk-all.bin"
 
       - name: Create wrapper script
         run: |
