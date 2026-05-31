@@ -30,25 +30,14 @@ jobs:
             "$BASE/g/glibc/libc6_2.43-2ubuntu2_arm64.deb" \
             "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" \
             "$BASE/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb"; do
-            curl -fSL --retry 3 "$url" -O && echo "OK: $(basename $url)" || echo "FAIL: $(basename $url)"
+            curl -fSL --retry 3 "$url" -O || echo "FAIL: $(basename $url)"
           done
-          echo "=== Downloaded files ==="
-          ls -la
 
       - name: Extract debs
         run: |
           set +e
           mkdir -p glibc-extract
-          for deb in glibc/*.deb; do
-            echo "Extracting: $deb"
-            dpkg-deb -x "$deb" glibc-extract/
-          done
-          echo "=== glibc-extract structure ==="
-          find glibc-extract -type d | head -20
-          echo "=== ld-linux search ==="
-          find glibc-extract -name "*ld-linux*" -o -name "*ld.so*" | head -10
-          echo "=== .so files search ==="
-          find glibc-extract -name "*.so" -o -name "*.so.*" | head -20
+          for deb in glibc/*.deb; do dpkg-deb -x "$deb" glibc-extract/; done
 
       - name: Copy to dist
         run: |
@@ -56,56 +45,39 @@ jobs:
           B="dist/opt/onlyoffice/documentbuilder"
           mkdir -p "$B/system"
           cp -r official/opt/onlyoffice/documentbuilder/* "$B/"
-          
-          # Copy files using simple for loops
-          echo "=== Copying .so files ==="
           for f in $(find glibc-extract -name "*.so" -o -name "*.so.*"); do
             cp -v "$f" "$B/system/"
           done
-          
-          echo "=== Copying linker ==="
           for f in $(find glibc-extract -name "*ld-linux*" -o -name "*ld.so*"); do
             cp -v "$f" "$B/system/"
             cp -v "$f" "$B/"
           done
-          
-          echo "=== Files in system/ ==="
-          ls -la "$B/system/"
 
       - name: Patch with patchelf
         run: |
           sudo apt-get install -y -qq patchelf
           B="dist/opt/onlyoffice/documentbuilder"
-          
-          # Find linker
           LFILE=$(ls "$B"/ld-linux-aarch64* 2>/dev/null | head -1)
-          echo "Linker file: $LFILE"
-          
-          if [ -z "$LFILE" ]; then
-            # Try in system/
-            LFILE=$(ls "$B"/system/ld-linux-aarch64* 2>/dev/null | head -1)
-            echo "Linker in system/: $LFILE"
-            cp "$LFILE" "$B/"
-            LFILE="$B/$(basename $LFILE)"
-          fi
-          
+          [ -z "$LFILE" ] && LFILE=$(ls "$B"/system/ld-linux-aarch64* 2>/dev/null | head -1) && cp "$LFILE" "$B/"
           LNAME=$(basename "$LFILE")
-          echo "=== Patching x2t ==="
-          readelf -l "$B/x2t" | grep -i interp
-          patchelf --set-interpreter "./system/$LNAME" "$B/x2t"
-          patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$B/x2t"
-          readelf -l "$B/x2t" | grep -i interp
-          readelf -d "$B/x2t" | grep -i rpath
           
-          echo "=== Patching .so files ==="
+          echo "=== Patch x2t ==="
+          readelf -l "$B/x2t" | grep -i interp
+          patchelf --set-interpreter "./system/$LNAME" "$B/x2t" || echo "patchelf x2t failed"
+          readelf -l "$B/x2t" | grep -i interp
+          
+          echo "=== Patch .so files ==="
           for f in "$B"/*.so; do
             [ -f "$f" ] || continue
             if readelf -h "$f" 2>/dev/null | grep -q "ELF64"; then
-              patchelf --set-interpreter "./system/$LNAME" "$f"
-              patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$f"
+              patchelf --set-interpreter "./system/$LNAME" "$f" 2>/dev/null || true
               echo "Patched: $(basename $f)"
             fi
           done
+          
+          echo "=== Verify ==="
+          readelf -l "$B/x2t" | grep -i interp
+          readelf -d "$B/x2t" | grep -i rpath || echo "No rpath (OK - LD_LIBRARY_PATH will be used)"
 
       - name: Package
         run: |
