@@ -16,22 +16,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download official aarch64 release
+      - name: Download official aarch64
         run: |
           wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz
           mkdir -p official
           tar -xJf official.tar.xz -C official
 
-      - name: Download arm64 glibc debs directly
+      - name: Download arm64 glibc debs
         run: |
           mkdir -p glibc
           cd glibc
           BASE="http://ports.ubuntu.com/ubuntu-ports/pool/main"
-          for pkg in \
-            "g/glibc/libc6_2.39-0ubuntu8.3_arm64.deb" \
-            "g/gcc-13/libgcc-s1_13.3.0-6ubuntu2~24.04_arm64.deb" \
-            "g/gcc-13/libstdc++6_13.3.0-6ubuntu2~24.04_arm64.deb"; do
-            wget -q "$BASE/$pkg" || true
+          for url in \
+            "$BASE/g/glibc/libc6_2.43-2ubuntu2_arm64.deb" \
+            "$BASE/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_arm64.deb" \
+            "$BASE/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_arm64.deb"; do
+            echo "Fetch: $url"
+            curl -fSL --retry 3 "$url" -O
           done
           ls -la
 
@@ -40,20 +41,20 @@ jobs:
           mkdir -p glibc-extract
           for deb in glibc/*.deb; do
             dpkg-deb -x "$deb" glibc-extract/
+            echo "OK: $deb"
           done
-          find glibc-extract -name "*.so*" -o -name "ld-linux*" | sort
-          ls -la glibc-extract/lib/
+          find glibc-extract -name "ld-linux*" -o -name "libc.so*" -o -name "libstdc++.so*" -o -name "libgcc_s.so*" | sort
 
-      - name: Bundle binaries
+      - name: Bundle
         run: |
           BUILDER="opt/onlyoffice/documentbuilder"
           OUTDIR="dist/$BUILDER"
           mkdir -p "$OUTDIR/system"
           cp -r official/$BUILDER/* "$OUTDIR/"
           cp -r glibc-extract/lib/aarch64-linux-gnu/*.so* "$OUTDIR/system/" 2>/dev/null || true
-          cp -r glibc-extract/lib/ld-linux-aarch64* "$OUTDIR/system/" 2>/dev/null || true
+          cp -v glibc-extract/lib/ld-linux-aarch64* "$OUTDIR/system/" 2>/dev/null || true
 
-      - name: Patch ELF interpreter
+      - name: Patch interpreter
         run: |
           sudo apt-get install -y -qq patchelf
           BUILDER="dist/opt/onlyoffice/documentbuilder"
@@ -62,11 +63,12 @@ jobs:
           echo "Linker: $LINKER_NAME"
           for f in $(find "$BUILDER" -type f); do
             if readelf -h "$f" 2>/dev/null | grep -q "ELF64.*aarch64"; then
-              patchelf --set-interpreter "./system/$LINKER_NAME" "$f" 2>/dev/null || true
-              patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$f" 2>/dev/null || true
+              patchelf --set-interpreter "./system/$LINKER_NAME" "$f"
+              patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$f"
             fi
           done
-          readelf -l "$BUILDER/x2t" | grep INTERP || true
+          echo "--- Verified ---"
+          readelf -l "$BUILDER/x2t" | grep "INTERP\|interpreter"
 
       - name: Package
         run: |
@@ -80,15 +82,13 @@ jobs:
           cat > dist/install.sh << 'INST'
           #!/bin/sh
           DEST="${1:-/opt/onlyoffice/documentbuilder}"
+          mkdir -p "$DEST"
           cp -r opt/onlyoffice/documentbuilder "$DEST"
           cp xlsx2pdf /usr/local/bin/
           chmod +x /usr/local/bin/xlsx2pdf
-          echo "Done. Run: xlsx2pdf input.xlsx [output.pdf]"
           INST
           chmod +x dist/install.sh
-          cd dist
-          tar -czf ../${PRODUCT}-aarch64-musl.tar.gz .
-          ls -lh ../${PRODUCT}-aarch64-musl.tar.gz
+          cd dist && tar -czf ../${PRODUCT}-aarch64-musl.tar.gz . && ls -lh ../*.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
