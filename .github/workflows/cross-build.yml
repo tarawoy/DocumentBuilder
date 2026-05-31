@@ -34,7 +34,6 @@ jobs:
             echo "Fetch: $url"
             curl -fSL --retry 3 "$url" -O
           done
-          ls -la
 
       - name: Extract debs
         run: |
@@ -43,7 +42,8 @@ jobs:
             dpkg-deb -x "$deb" glibc-extract/
             echo "OK: $deb"
           done
-          find glibc-extract -name "ld-linux*" -o -name "libc.so*" -o -name "libstdc++.so*" -o -name "libgcc_s.so*" | sort
+          echo "=== Files extracted ==="
+          find glibc-extract -type f -name "*.so*" -o -name "ld-*" | sort
 
       - name: Bundle
         run: |
@@ -51,24 +51,35 @@ jobs:
           OUTDIR="dist/$BUILDER"
           mkdir -p "$OUTDIR/system"
           cp -r official/$BUILDER/* "$OUTDIR/"
-          cp -r glibc-extract/lib/aarch64-linux-gnu/*.so* "$OUTDIR/system/" 2>/dev/null || true
-          cp -v glibc-extract/lib/ld-linux-aarch64* "$OUTDIR/system/" 2>/dev/null || true
+          # Find and copy all .so and linker files
+          find glibc-extract -name "*.so*" -exec cp -v {} "$OUTDIR/system/" \;
+          find glibc-extract -name "ld-linux-aarch64*" -exec cp -v {} "$OUTDIR/system/" \;
+          echo "=== System libs ==="
+          ls -la "$OUTDIR/system/"
 
       - name: Patch interpreter
         run: |
           sudo apt-get install -y -qq patchelf
-          BUILDER="dist/opt/onlyoffice/documentbuilder"
-          LINKER=$(find "$BUILDER/system" -name "ld-linux-aarch64*" | head -1)
-          LINKER_NAME=$(basename "$LINKER")
-          echo "Linker: $LINKER_NAME"
-          for f in $(find "$BUILDER" -type f); do
-            if readelf -h "$f" 2>/dev/null | grep -q "ELF64.*aarch64"; then
-              patchelf --set-interpreter "./system/$LINKER_NAME" "$f"
-              patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$f"
-            fi
-          done
-          echo "--- Verified ---"
-          readelf -l "$BUILDER/x2t" | grep "INTERP\|interpreter"
+          B="dist/opt/onlyoffice/documentbuilder"
+          LINKER=$(find "$B" -name "ld-linux-aarch64*" -type f | head -1)
+          echo "Linker found: $LINKER"
+          if [ -n "$LINKER" ]; then
+            LNAME=$(basename "$LINKER")
+            # Copy to root too
+            cp "$LINKER" "$B/"
+            for f in $(find "$B" -type f); do
+              if readelf -h "$f" 2>/dev/null | grep -q "ELF64.*aarch64"; then
+                echo "Patching: $(basename $f)"
+                patchelf --set-interpreter "./system/$LNAME" "$f"
+                patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$f"
+              fi
+            done
+            echo "=== Verified ==="
+            readelf -l "$B/x2t" | grep "INTERP"
+          else
+            echo "ERROR: No linker found!"
+            exit 1
+          fi
 
       - name: Package
         run: |
@@ -79,18 +90,11 @@ jobs:
           exec "$DIR/opt/onlyoffice/documentbuilder/x2t" "$@"
           WRAP
           chmod +x dist/xlsx2pdf
-          cat > dist/install.sh << 'INST'
-          #!/bin/sh
-          DEST="${1:-/opt/onlyoffice/documentbuilder}"
-          mkdir -p "$DEST"
-          cp -r opt/onlyoffice/documentbuilder "$DEST"
-          cp xlsx2pdf /usr/local/bin/
-          chmod +x /usr/local/bin/xlsx2pdf
-          INST
-          chmod +x dist/install.sh
-          cd dist && tar -czf ../${PRODUCT}-aarch64-musl.tar.gz . && ls -lh ../*.tar.gz
+          cd dist
+          tar -czf ../onlyoffice-documentbuilder-aarch64-musl.tar.gz .
+          ls -lh ../onlyoffice-documentbuilder-aarch64-musl.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${PRODUCT}-aarch64-musl
-          path: ${PRODUCT}-aarch64-musl.tar.gz
+          name: onlyoffice-documentbuilder-aarch64-musl
+          path: onlyoffice-documentbuilder-aarch64-musl.tar.gz
