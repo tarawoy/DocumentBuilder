@@ -45,10 +45,11 @@ jobs:
           B="dist/opt/onlyoffice/documentbuilder"
           mkdir -p "$B/system"
           cp -r official/opt/onlyoffice/documentbuilder/* "$B/"
-          for f in $(find glibc-extract -name "*.so" -o -name "*.so.*"); do
+          # Use -type f to avoid matching directories like ld.so.conf.d
+          for f in $(find glibc-extract -type f -name "*.so" -o -type f -name "*.so.*"); do
             cp -v "$f" "$B/system/"
           done
-          for f in $(find glibc-extract -name "*ld-linux*" -o -name "*ld.so*"); do
+          for f in $(find glibc-extract -type f -name "*ld-linux*" -o -type f -name "*ld.so*"); do
             cp -v "$f" "$B/system/"
             cp -v "$f" "$B/"
           done
@@ -60,24 +61,11 @@ jobs:
           LFILE=$(ls "$B"/ld-linux-aarch64* 2>/dev/null | head -1)
           [ -z "$LFILE" ] && LFILE=$(ls "$B"/system/ld-linux-aarch64* 2>/dev/null | head -1) && cp "$LFILE" "$B/"
           LNAME=$(basename "$LFILE")
-          
           echo "=== Patch x2t ==="
           readelf -l "$B/x2t" | grep -i interp
-          patchelf --set-interpreter "./system/$LNAME" "$B/x2t" || echo "patchelf x2t failed"
-          readelf -l "$B/x2t" | grep -i interp
-          
-          echo "=== Patch .so files ==="
-          for f in "$B"/*.so; do
-            [ -f "$f" ] || continue
-            if readelf -h "$f" 2>/dev/null | grep -q "ELF64"; then
-              patchelf --set-interpreter "./system/$LNAME" "$f" 2>/dev/null || true
-              echo "Patched: $(basename $f)"
-            fi
-          done
-          
+          patchelf --set-interpreter "./system/$LNAME" "$B/x2t"
           echo "=== Verify ==="
           readelf -l "$B/x2t" | grep -i interp
-          readelf -d "$B/x2t" | grep -i rpath || echo "No rpath (OK - LD_LIBRARY_PATH will be used)"
 
       - name: Package
         run: |
