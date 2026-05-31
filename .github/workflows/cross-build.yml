@@ -51,7 +51,7 @@ jobs:
           # Create missing libstdc++ symlink
           cd "$DEST/system"
           ls libstdc++.so.6* 2>/dev/null || { L=$(ls libstdc++.so.6.0* 2>/dev/null | head -1); [ -n "$L" ] && ln -sf "$L" libstdc++.so.6; }
-          cd /workspace
+          cd /home/runner
 
       - name: Ensure AllFonts.js exists
         run: |
