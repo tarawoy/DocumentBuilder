@@ -10,7 +10,7 @@ env:
 
 jobs:
   bundle:
-    name: Bundle official + glibc for musl
+    name: Build for aarch64-musl
     runs-on: ubuntu-24.04
 
     steps:
@@ -21,65 +21,54 @@ jobs:
           wget -q "https://github.com/ONLYOFFICE/DocumentBuilder/releases/download/v9.4.0/onlyoffice-documentbuilder-linux-aarch64.tar.xz" -O official.tar.xz
           mkdir -p official
           tar -xJf official.tar.xz -C official
+          ls official/opt/onlyoffice/documentbuilder/x2t
 
-      - name: Download Ubuntu aarch64 glibc
+      - name: Extract glibc for aarch64 via apt
         run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update -qq
+          cd /tmp
+          apt-get download libc6:arm64 libstdc++6:arm64 libgcc-s1:arm64
           mkdir -p glibc
-          cd glibc
-          wget -q "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04-base-arm64.tar.gz" -O rootfs.tar.gz
-          tar -xzf rootfs.tar.gz
-          find . -name "*.so*" -o -name "ld-linux*" | head -20
+          for deb in *.deb; do
+            dpkg-deb -x "$deb" glibc/
+          done
+          find glibc -name "*.so*" -o -name "ld-linux*" | sort
+          ls -la glibc/lib/
 
-      - name: Bundle everything
+      - name: Bundle binaries
         run: |
           BUILDER="opt/onlyoffice/documentbuilder"
           OUTDIR="dist/$BUILDER"
           mkdir -p "$OUTDIR/system"
           cp -r official/$BUILDER/* "$OUTDIR/"
-          cp -r glibc/lib/aarch64-linux-gnu/*.so* "$OUTDIR/system/" 2>/dev/null || true
-          LDLINUX=$(find glibc -name "ld-linux-aarch64*" -type f | head -1)
-          if [ -n "$LDLINUX" ]; then
-            cp -v "$LDLINUX" "$OUTDIR/system/"
-            cp -v "$LDLINUX" "$OUTDIR/"
-          fi
+          cp -r /tmp/glibc/lib/aarch64-linux-gnu/*.so* "$OUTDIR/system/" 2>/dev/null || true
+          cp -r /tmp/glibc/lib/ld-linux-aarch64* "$OUTDIR/system/" 2>/dev/null || true
 
       - name: Patch ELF interpreter
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq patchelf
+          sudo apt-get install -y -qq patchelf
           BUILDER="dist/opt/onlyoffice/documentbuilder"
-          LINKER=$(find "$BUILDER" -name "ld-linux-aarch64*" | head -1)
+          LINKER=$(find "$BUILDER/system" -name "ld-linux-aarch64*" | head -1)
           LINKER_NAME=$(basename "$LINKER")
           echo "Linker: $LINKER_NAME"
-          find "$BUILDER" -type f | while read f; do
+          for f in $(find "$BUILDER" -type f); do
             if readelf -h "$f" 2>/dev/null | grep -q "ELF64.*aarch64"; then
               patchelf --set-interpreter "./system/$LINKER_NAME" "$f" 2>/dev/null || true
               patchelf --set-rpath "\$ORIGIN:\$ORIGIN/system" "$f" 2>/dev/null || true
             fi
           done
-          readelf -l "$BUILDER/x2t" | grep "interpreter\|INTERP" || true
+          readelf -l "$BUILDER/x2t" | grep INTERP || true
 
-      - name: Create wrapper scripts + package
+      - name: Package
         run: |
-          cat > dist/xlsx2pdf.sh << 'WRAP'
+          cat > dist/xlsx2pdf << 'WRAP'
           #!/bin/sh
           DIR="$(cd "$(dirname "$0")" && pwd)"
           export LD_LIBRARY_PATH="$DIR/opt/onlyoffice/documentbuilder:$DIR/opt/onlyoffice/documentbuilder/system"
           exec "$DIR/opt/onlyoffice/documentbuilder/x2t" "$@"
           WRAP
-          chmod +x dist/xlsx2pdf.sh
-          
-          cat > dist/install.sh << 'INST'
-          #!/bin/sh
-          DEST="${1:-/opt/onlyoffice/documentbuilder}"
-          echo "Installing to $DEST..."
-          mkdir -p "$DEST"
-          cp -r opt/onlyoffice/documentbuilder/* "$DEST/"
-          cp xlsx2pdf.sh /usr/local/bin/xlsx2pdf
-          chmod +x /usr/local/bin/xlsx2pdf
-          echo "Done."
-          INST
-          chmod +x dist/install.sh
-          
+          chmod +x dist/xlsx2pdf
           cd dist
           tar -czf ../${PRODUCT}-aarch64-musl.tar.gz .
           ls -lh ../${PRODUCT}-aarch64-musl.tar.gz
